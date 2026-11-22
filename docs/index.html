@@ -1,0 +1,775 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src blob: data:; connect-src 'none'; media-src blob:">
+<title>Lossless Check</title>
+<style>
+:root {
+  --bg: #fafaf9; --fg: #1c1b1a; --muted: #6b6965; --line: #e4e2de; --card: #ffffff;
+  --accent: #c2410c; --accent-bg: #fff1ea;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161514; --fg: #ecebe8; --muted: #9b9893; --line: #2e2c2a; --card: #1e1d1b;
+    --accent: #fb8a4c; --accent-bg: #3a2216;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 980px; margin: 0 auto; padding: 40px 16px 64px; }
+h1 { font-size: 28px; margin: 0 0 6px; letter-spacing: -0.01em; }
+.lede { color: var(--muted); margin: 0 0 24px; max-width: 640px; }
+#drop { border: 1.5px dashed var(--line); border-radius: 12px; padding: 28px 20px; text-align: center; background: var(--card); }
+#drop.over { border-color: var(--accent); }
+#drop p { margin: 0 0 14px; color: var(--muted); }
+button { font: inherit; padding: 8px 16px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; }
+button.primary { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+button:hover { border-color: var(--muted); }
+.privacy { font-size: 13px; color: var(--muted); margin-top: 12px; }
+#status { color: var(--muted); font-size: 13px; margin: 20px 0 8px; min-height: 20px; }
+#summary { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+.stat { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 8px 14px; display: flex; gap: 8px; align-items: baseline; }
+.stat b { font-size: 20px; }
+.stat span { color: var(--muted); font-size: 13px; }
+.stat.bad b { color: var(--accent); }
+.bar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.table-wrap { overflow-x: auto; background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+table { width: 100%; border-collapse: collapse; min-width: 560px; }
+th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+td { padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+tr.row { cursor: pointer; }
+tr.row:hover td, tr.row.open td { background: var(--bg); }
+td.name small { color: var(--muted); font-size: 12px; word-break: break-all; }
+td.claim, td.wall { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--muted); }
+.tag { font-size: 13px; white-space: nowrap; color: var(--muted); }
+.tag.lossy, .tag.upsampled, .tag.padded { color: var(--accent); background: var(--accent-bg); padding: 2px 8px; border-radius: 6px; font-weight: 500; }
+.tag.error { color: var(--muted); font-style: italic; }
+tr.detail td { background: var(--bg); }
+tr.detail p { margin: 0 0 10px; max-width: 640px; }
+.chart { display: block; }
+.how { margin-top: 40px; color: var(--muted); font-size: 14px; max-width: 680px; }
+.how h2 { color: var(--fg); font-size: 16px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Lossless Check</h1>
+  <p class="lede">Finds "lossless" FLAC and WAV files that were really made from an MP3, plus fake Hi-Res: CD audio upsampled to 96 kHz, or 16-bit padded to 24-bit.</p>
+
+  <div id="drop">
+    <p>Drop a music folder here, or</p>
+    <button id="pick-folder" class="primary">Choose folder</button>
+    <button id="pick-files">Choose files</button>
+    <input id="folder" type="file" webkitdirectory multiple hidden>
+    <input id="files" type="file" accept=".flac,.wav" multiple hidden>
+    <div class="privacy">Runs entirely in your browser. Your files are never uploaded.</div>
+  </div>
+
+  <div id="status"></div>
+  <section id="results" hidden>
+    <div class="bar">
+      <div id="summary"></div>
+      <button id="export" hidden>Export CSV</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>File</th><th>Claims</th><th>Wall</th><th>Verdict</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="how">
+    <h2>How it works</h2>
+    <p>MP3 and AAC encoders throw away the top of the spectrum: about 16 kHz and up at 128 kbps, 19 kHz at 192, 20 kHz at 320. Converting that file to FLAC keeps the hole. This page averages the spectrum of each song and looks for a sharp "wall" onto a flat noise floor. Real recordings keep sloping and wobbling up to the format's own limit.</p>
+    <p>Walls at 20.4 kHz or higher are not flagged, because many genuine masters have one there. Very high-bitrate VBR MP3 (LAME V0) and AAC 256 leave no wall, so they can't be told apart, but those already sound close to lossless. Click any row to see its spectrum.</p>
+  </section>
+</main>
+<script>
+(() => {
+// ---- lib/fft.js
+// In-place iterative radix-2 FFT on separate real/imag Float64Arrays.
+// Twiddles and the bit-reversal table are cached per size.
+const cache = new Map();
+
+function plan(n) {
+  let p = cache.get(n);
+  if (p) return p;
+  if (n & (n - 1)) throw new Error('FFT size must be a power of two');
+  const rev = new Uint32Array(n);
+  const bits = Math.log2(n);
+  for (let i = 0; i < n; i++) {
+    let r = 0;
+    for (let b = 0; b < bits; b++) r |= ((i >> b) & 1) << (bits - 1 - b);
+    rev[i] = r;
+  }
+  const cos = new Float64Array(n / 2);
+  const sin = new Float64Array(n / 2);
+  for (let i = 0; i < n / 2; i++) {
+    cos[i] = Math.cos((2 * Math.PI * i) / n);
+    sin[i] = -Math.sin((2 * Math.PI * i) / n);
+  }
+  p = { rev, cos, sin };
+  cache.set(n, p);
+  return p;
+}
+
+function fft(re, im) {
+  const n = re.length;
+  const { rev, cos, sin } = plan(n);
+  for (let i = 0; i < n; i++) {
+    const j = rev[i];
+    if (j > i) {
+      let t = re[i]; re[i] = re[j]; re[j] = t;
+      t = im[i]; im[i] = im[j]; im[j] = t;
+    }
+  }
+  for (let size = 2; size <= n; size <<= 1) {
+    const half = size >> 1;
+    const step = n / size;
+    for (let start = 0; start < n; start += size) {
+      for (let k = 0; k < half; k++) {
+        const wr = cos[k * step];
+        const wi = sin[k * step];
+        const a = start + k;
+        const b = a + half;
+        const tr = re[b] * wr - im[b] * wi;
+        const ti = re[b] * wi + im[b] * wr;
+        re[b] = re[a] - tr;
+        im[b] = im[a] - ti;
+        re[a] += tr;
+        im[a] += ti;
+      }
+    }
+  }
+}
+
+function hann(n) {
+  const w = new Float64Array(n);
+  for (let i = 0; i < n; i++) w[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (n - 1));
+  return w;
+}
+
+// Magnitude spectra of successive frames: calls onFrame(mag, frameIndex) with
+// mag of length size/2+1 (reused buffer, copy it if you keep it).
+function stft(signal, size, hop, onFrame) {
+  const win = hann(size);
+  const re = new Float64Array(size);
+  const im = new Float64Array(size);
+  const mag = new Float64Array(size / 2 + 1);
+  let f = 0;
+  for (let start = 0; start + size <= signal.length; start += hop, f++) {
+    for (let i = 0; i < size; i++) {
+      re[i] = signal[start + i] * win[i];
+      im[i] = 0;
+    }
+    fft(re, im);
+    for (let k = 0; k <= size / 2; k++) mag[k] = Math.hypot(re[k], im[k]);
+    onFrame(mag, f);
+  }
+  return f;
+}
+
+// ---- lib/spectrum.js
+// Is a "lossless" file really lossless? Pure functions, run in the analysis worker.
+//
+// Lossy encoders throw away the top of the spectrum: LAME cuts everything above
+// ~16 kHz at 128 kbps, ~19 kHz at 192 kbps and ~20 kHz at 320 kbps. Converting
+// that MP3 to FLAC keeps the hole, so a FLAC with a brick wall well below the
+// Nyquist frequency was made from a lossy file. Real recordings roll off
+// gradually, or only at the CD's own anti-alias filter (~21-22 kHz).
+//
+// The same wall exposes fake Hi-Res: a 96 kHz file upsampled from a CD has
+// nothing above ~22 kHz. And a "24-bit" file padded from 16-bit has its lowest
+// 8 bits all zero.
+
+const SIZE = 8192;
+const FRAMES = 200;
+const BAND = 100; // Hz per band of the smoothed spectrum
+
+// Power-averaged spectrum in dB, over up to FRAMES frames spread across the
+// song (silent frames skipped). Returns { bands: dB per BAND Hz, bandHz }.
+function averageSpectrum(mono, rate) {
+  const total = Math.floor((mono.length - SIZE) / SIZE);
+  const hop = SIZE * Math.max(1, Math.floor(total / FRAMES));
+  const power = new Float64Array(SIZE / 2 + 1);
+  let used = 0;
+  stft(mono, SIZE, hop, (mag) => {
+    let e = 0;
+    for (let k = 1; k < mag.length; k++) e += mag[k] * mag[k];
+    if (e < 1e-6) return; // silence
+    for (let k = 0; k < mag.length; k++) power[k] += mag[k] * mag[k];
+    used++;
+  });
+  const binHz = rate / SIZE;
+  const n = Math.floor(rate / 2 / BAND);
+  const bands = new Float64Array(n);
+  for (let b = 0; b < n; b++) {
+    const k0 = Math.ceil((b * BAND) / binHz);
+    const k1 = Math.min(power.length - 1, Math.floor(((b + 1) * BAND) / binHz));
+    let p = 0;
+    for (let k = k0; k <= k1; k++) p += power[k];
+    p /= Math.max(1, k1 - k0 + 1) * Math.max(1, used);
+    bands[b] = 10 * Math.log10(p + 1e-20);
+  }
+  return { bands, bandHz: BAND, frames: used };
+}
+
+const mean = (a, i0, i1) => {
+  let s = 0, n = 0;
+  for (let i = Math.max(0, i0); i < Math.min(a.length, i1); i++) { s += a[i]; n++; }
+  return n ? s / n : -200;
+};
+
+// The lowest brick wall above 11 kHz: { cutoff (Hz), step (dB) }, or cutoff
+// null. A wall is a sharp step (most of it within 1 kHz) down onto a flat
+// floor: after a lossy encoder's low-pass only noise is left (dither, or the
+// clipping of a hot master), which is flat, while real music keeps sloping and
+// wobbling. Walls within ~1.3 kHz of Nyquist are the format's own anti-alias
+// filter and are ignored.
+const MIN_STEP = 12;
+const FLAT = 4; // dB, max spread of the floor (or a quarter of the step, if bigger)
+function findCutoff({ bands, bandHz }) {
+  const b = (hz) => Math.round(hz / bandHz);
+  const last = bands.length - 1;
+  let best = 0;
+  for (let i = b(11000); i <= last - b(1300); i++) {
+    const r0 = i + b(800), r1 = Math.min(last, i + b(2600));
+    const floor = mean(bands, r0, r1);
+    let lo = Infinity, hi = -Infinity;
+    for (let k = r0; k < r1; k++) { lo = Math.min(lo, bands[k]); hi = Math.max(hi, bands[k]); }
+    const below = mean(bands, i - b(600), i - b(200));
+    const step = below - floor;
+    best = Math.max(best, step);
+    if (step < MIN_STEP || hi - lo > Math.max(FLAT, step / 4)) continue;
+    if (bands[i - b(200)] - bands[i + b(800)] < 0.7 * step) continue; // gradual, not a wall
+    // Refine: the first band past the midpoint level.
+    const mid = below - step / 2;
+    let k = i - b(200);
+    while (k < i + b(800) && bands[k] > mid) k++;
+    return { cutoff: k * bandHz, step: round1(step) };
+  }
+  return { cutoff: null, step: round1(best) };
+}
+const round1 = (v) => Math.round(v * 10) / 10;
+
+// For a 24-bit file: true when every probed sample is a multiple of 256, i.e.
+// the file holds 16-bit audio with zero padding. Needs a lossless decode at the
+// file's own rate (any resampling makes this return false, never a false alarm).
+function padded16(channels, bitDepth) {
+  if (bitDepth !== 24) return false;
+  let seen = 0;
+  for (const c of channels) {
+    const step = Math.max(1, Math.floor(c.length / 20000));
+    for (let i = 0; i < c.length; i += step) {
+      const v = c[i];
+      if (v === 0) continue;
+      const n = Math.round(v * 8388608);
+      if (Math.abs(v * 8388608 - n) > 1e-3 || n % 256 !== 0) return false;
+      seen++;
+    }
+  }
+  return seen >= 1000;
+}
+
+// Everything the quality grade needs, stored with the analysis.
+function authenticity(channels, mono, rate, bitDepth) {
+  const { cutoff, step } = findCutoff(averageSpectrum(mono, rate));
+  return { cutoff, step, rate, padded: padded16(channels, bitDepth) };
+}
+
+// ---- lib/pcm.js
+// Exact PCM after browser decoding.
+//
+// Chromium converts decoded integer samples to float asymmetrically: negative
+// values are divided by 2^(b-1) but positive ones by 2^(b-1) - 1 (found while
+// testing Tonearm: hashing a decoded 16-bit FLAC only matched ffmpeg's PCM when
+// positives were scaled back by 32767). Nothing is lost, but every positive
+// sample is ~0.003% too big, so a 16-bit sample above half scale lands one step
+// off when Windows converts the float back to integers.
+//
+// canonicalize() detects the divisor each sign actually used and rewrites
+// the samples to the standard int / 2^(b-1), the representation ffmpeg, DAWs
+// and Web Audio's own maths assume. It only acts when every probed sample is
+// an exact integer step under one divisor, i.e. a lossless, unresampled
+// decode; anything else (MP3, a resampled buffer) is left alone.
+const PROBE = 4000;
+
+// float32 can't hold s/32767 exactly, so allow 0.01 of a step for 16-bit. For
+// 24-bit the asymmetry (~5e-10) is below float32 resolution: the values already
+// sit on the exact grid, so only the standard divisor is checked, tightly.
+function detect(chs, sign, scale, bits) {
+  const cands = bits === 16 ? [scale, scale - 1] : [scale];
+  const tol = bits === 16 ? 0.01 : 1e-6;
+  const ok = [0, 0];
+  let seen = 0;
+  outer: for (const c of chs) {
+    const step = Math.max(1, Math.floor(c.length / (PROBE * 4)));
+    for (let i = 0; i < c.length; i += step) {
+      const v = c[i];
+      if (sign > 0 ? v <= 0 : v >= 0) continue;
+      seen++;
+      for (let k = 0; k < cands.length; k++) {
+        const x = Math.abs(v) * cands[k];
+        if (Math.abs(x - Math.round(x)) < tol) ok[k]++;
+      }
+      if (seen >= PROBE) break outer;
+    }
+  }
+  if (seen < 50) return null;
+  // Prefer the standard divisor when both fit (tiny values fit either).
+  if (ok[0] === seen) return cands[0];
+  if (cands.length > 1 && ok[1] === seen) return cands[1];
+  return undefined; // not integer-aligned: lossy or resampled
+}
+
+// chs: Float32Arrays (modified in place). bits: source bit depth (16 or 24).
+// -> { exact: bool, changed: number of samples rewritten, posDivisor, negDivisor }
+function canonicalize(chs, bits) {
+  if (!(bits === 16 || bits === 24) || !chs.length) return { exact: false, changed: 0 };
+  const scale = 2 ** (bits - 1);
+  const pos = detect(chs, 1, scale, bits);
+  const neg = detect(chs, -1, scale, bits);
+  if (pos === undefined || neg === undefined) return { exact: false, changed: 0 };
+  const pd = pos ?? scale, nd = neg ?? scale;
+  let changed = 0;
+  if (pd !== scale || nd !== scale) {
+    for (const c of chs) {
+      for (let i = 0; i < c.length; i++) {
+        const v = c[i];
+        const d = v > 0 ? pd : nd;
+        if (d === scale) continue;
+        const fixed = Math.round(v * d) / scale;
+        if (fixed !== v) { c[i] = fixed; changed++; }
+      }
+    }
+  }
+  return { exact: true, changed, posDivisor: pd, negDivisor: nd };
+}
+
+// FNV-1a over 16-bit little-endian interleaved samples (for tests and checks).
+function pcm16Hash(chs) {
+  let h = 0x811c9dc5;
+  const n = chs[0].length;
+  for (let i = 0; i < n; i++) {
+    for (const c of chs) {
+      const s = Math.max(-32768, Math.min(32767, Math.round(c[i] * 32768)));
+      const u = s & 0xffff;
+      h ^= u & 255; h = Math.imul(h, 0x01000193) >>> 0;
+      h ^= u >> 8; h = Math.imul(h, 0x01000193) >>> 0;
+    }
+  }
+  return h.toString(16);
+}
+
+// ---- lib/container.js
+// Reads what a FLAC or WAV file claims about itself, and for FLAC builds a
+// clean stream ("fLaC" + STREAMINFO marked last + audio frames). Browsers
+// refuse a whole FLAC over one malformed metadata block (seen in the wild: a
+// PICTURE with a broken MIME type), and the cover art isn't needed anyway.
+
+const ascii = (b, o, n) => String.fromCharCode(...b.subarray(o, o + n));
+
+function id3Size(b) {
+  if (ascii(b, 0, 3) !== 'ID3') return 0;
+  return 10 + (((b[6] & 0x7f) << 21) | ((b[7] & 0x7f) << 14) | ((b[8] & 0x7f) << 7) | (b[9] & 0x7f));
+}
+
+function vorbisComments(b, o, len) {
+  const dv = new DataView(b.buffer, b.byteOffset + o, len);
+  const dec = new TextDecoder();
+  const tags = {};
+  let p = 4 + dv.getUint32(0, true);
+  const n = dv.getUint32(p, true);
+  p += 4;
+  for (let i = 0; i < n && p + 4 <= len; i++) {
+    const l = dv.getUint32(p, true);
+    p += 4;
+    const s = dec.decode(b.subarray(o + p, o + p + l));
+    p += l;
+    const eq = s.indexOf('=');
+    if (eq > 0) {
+      const k = s.slice(0, eq).toUpperCase();
+      if (!(k in tags)) tags[k] = s.slice(eq + 1);
+    }
+  }
+  return tags;
+}
+
+// bytes: Uint8Array of the whole file.
+// -> { format: 'flac', rate, bits, channels, samples, tags, clean: Uint8Array }
+function parseFlac(bytes) {
+  const o = id3Size(bytes);
+  if (ascii(bytes, o, 4) !== 'fLaC') throw new Error('not a FLAC file');
+  let p = o + 4;
+  let info = null;
+  let tags = {};
+  for (;;) {
+    if (p + 4 > bytes.length) throw new Error('metadata runs past the end of the file');
+    const last = bytes[p] & 0x80;
+    const type = bytes[p] & 0x7f;
+    const len = (bytes[p + 1] << 16) | (bytes[p + 2] << 8) | bytes[p + 3];
+    const body = p + 4;
+    if (type === 0) {
+      const s = bytes.subarray(body, body + 34);
+      info = {
+        rate: (s[10] << 12) | (s[11] << 4) | (s[12] >> 4),
+        channels: ((s[12] >> 1) & 7) + 1,
+        bits: (((s[12] & 1) << 4) | (s[13] >> 4)) + 1,
+        samples: (s[13] & 15) * 2 ** 32 + ((s[14] << 24) >>> 0) + (s[15] << 16) + (s[16] << 8) + s[17],
+      };
+    } else if (type === 4) {
+      try { tags = vorbisComments(bytes, body, len); } catch { tags = {}; }
+    }
+    p = body + len;
+    if (last) break;
+  }
+  if (!info) throw new Error('no STREAMINFO block');
+  const head = bytes.slice(o, o + 42);
+  head[4] = 0x80; // STREAMINFO, last-metadata-block flag set
+  const clean = new Uint8Array(42 + bytes.length - p);
+  clean.set(head, 0);
+  clean.set(bytes.subarray(p), 42);
+  return { format: 'flac', ...info, tags, clean };
+}
+
+// -> { format: 'wav', rate, bits, channels, tags: {}, clean: bytes }
+function parseWav(bytes) {
+  if (ascii(bytes, 0, 4) !== 'RIFF' || ascii(bytes, 8, 4) !== 'WAVE') throw new Error('not a WAV file');
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let p = 12;
+  while (p + 8 <= bytes.length) {
+    const id = ascii(bytes, p, 4);
+    const len = dv.getUint32(p + 4, true);
+    if (id === 'fmt ') {
+      const fmt = dv.getUint16(p + 8, true);
+      const extensible = fmt === 0xfffe;
+      if (fmt !== 1 && !extensible) throw new Error('not integer PCM');
+      return {
+        format: 'wav',
+        channels: dv.getUint16(p + 10, true),
+        rate: dv.getUint32(p + 12, true),
+        bits: dv.getUint16(p + 22, true),
+        tags: {},
+        clean: bytes,
+      };
+    }
+    p += 8 + len + (len & 1);
+  }
+  throw new Error('no fmt chunk');
+}
+
+function parseFile(name, bytes) {
+  const ext = name.toLowerCase().split('.').pop();
+  if (ext === 'flac') return parseFlac(bytes);
+  if (ext === 'wav') return parseWav(bytes);
+  throw new Error('only FLAC and WAV are checked');
+}
+
+// ---- lib/verdict.js
+// Turns the spectrum evidence into a verdict in plain words.
+//
+// Where a lossy encoder's low-pass sits says roughly what bitrate the source
+// had (LAME: ~16 kHz at 128 kbps, ~18.6 at 192, ~20 at 320; calibrated with
+// ffmpeg round trips). Above 20.4 kHz a wall is also common in genuine
+// masters, so it doesn't count.
+const LOSSY_WALL = 20400;
+
+function lossySource(cutoff) {
+  if (!cutoff || cutoff >= LOSSY_WALL) return null;
+  if (cutoff < 17000) return '128';
+  if (cutoff < 19000) return '192';
+  return '320';
+}
+
+const khz = (hz) => `${(hz / 1000).toFixed(hz % 1000 ? 1 : 0)} kHz`;
+
+// info: { bits, rate }, src: { cutoff, step, padded }
+// -> { kind: 'real' | 'lossy' | 'upsampled' | 'padded', label, why }
+function verdict(info, src) {
+  const { bits, rate } = info;
+  const hires = bits >= 24 || rate > 48000;
+  const kbps = lossySource(src.cutoff);
+  if (kbps) {
+    return {
+      kind: 'lossy',
+      label: `Fake: really ~${kbps} kbps`,
+      why: `No sound above ${khz(src.cutoff)}, the mark a ${kbps} kbps MP3/AAC leaves. Converting it to lossless can't bring back what was thrown away.`,
+    };
+  }
+  if (hires && src.cutoff && rate > 48000 && src.cutoff <= 24500) {
+    return {
+      kind: 'upsampled',
+      label: 'Fake Hi-Res: upsampled CD',
+      why: `No sound above ${khz(src.cutoff)} in a ${khz(rate)} file, so it was upsampled from CD quality. Same sound as the CD, bigger file.`,
+    };
+  }
+  if (hires && src.padded) {
+    return {
+      kind: 'padded',
+      label: `Fake ${bits}-bit: 16-bit inside`,
+      why: `Only 16 of the ${bits} bits carry sound; the rest are zeros.`,
+    };
+  }
+  return {
+    kind: 'real',
+    label: hires ? 'Real Hi-Res' : 'Real lossless',
+    why: src.cutoff
+      ? `Full band up to ${khz(src.cutoff)}, where the format's own filter sits. No sign of a lossy source.`
+      : 'Sound all the way up the spectrum. No sign of a lossy source.',
+  };
+}
+
+// ---- app.js
+
+
+
+
+const MAX_BYTES = 600 * 1024 * 1024;
+const $ = (s) => document.querySelector(s);
+const results = [];
+window.__results = results; // read by the test driver
+
+const queue = [];
+let running = false;
+
+function addFiles(list) {
+  const files = [...list].filter((f) => /\.(flac|wav)$/i.test(f.name));
+  files.sort((a, b) => (a.webkitRelativePath || a.name).localeCompare(b.webkitRelativePath || b.name));
+  if (!files.length) {
+    status('No FLAC or WAV files in that selection.');
+    return;
+  }
+  queue.push(...files);
+  $('#results').hidden = false;
+  if (!running) run();
+}
+
+async function run() {
+  running = true;
+  while (queue.length) {
+    const file = queue.shift();
+    status(`Checking ${results.length + 1} of ${results.length + 1 + queue.length}: ${file.name}`);
+    const r = await check(file);
+    results.push(r);
+    addRow(r);
+    summary();
+  }
+  running = false;
+  status(`Done. ${results.length} file${results.length === 1 ? '' : 's'} checked.`);
+  window.__done = true;
+}
+
+async function check(file) {
+  const base = { name: file.name, path: file.webkitRelativePath || file.name, size: file.size };
+  try {
+    if (file.size > MAX_BYTES) throw new Error('file is too big to check in a browser tab');
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const info = parseFile(file.name, bytes);
+    const ctx = new OfflineAudioContext(Math.min(info.channels, 2), 1, info.rate);
+    const audio = await ctx.decodeAudioData(info.clean.buffer.slice(info.clean.byteOffset, info.clean.byteOffset + info.clean.byteLength));
+    const channels = [];
+    for (let c = 0; c < audio.numberOfChannels; c++) channels.push(audio.getChannelData(c));
+    canonicalize(channels, info.bits);
+    const n = channels[0].length;
+    const mono = new Float32Array(n);
+    for (const ch of channels) for (let i = 0; i < n; i++) mono[i] += ch[i] / channels.length;
+    const spectrum = averageSpectrum(mono, audio.sampleRate);
+    const { cutoff, step } = findCutoff(spectrum);
+    const padded = padded16(channels, info.bits);
+    const src = { cutoff, step, padded };
+    const v = verdict(info, src);
+    const t = info.tags;
+    return {
+      ...base,
+      title: t.TITLE || '',
+      artist: t.ARTIST || '',
+      format: info.format.toUpperCase(),
+      bits: info.bits,
+      rate: info.rate,
+      seconds: n / audio.sampleRate,
+      cutoff,
+      step,
+      padded,
+      kind: v.kind,
+      label: v.label,
+      why: v.why,
+      bands: Array.from(spectrum.bands, (x) => Math.round(x * 10) / 10),
+      bandHz: spectrum.bandHz,
+    };
+  } catch (e) {
+    return { ...base, kind: 'error', label: 'Could not check', why: e.message || String(e) };
+  }
+}
+
+// ---------- UI ----------
+
+function status(text) {
+  $('#status').textContent = text;
+}
+
+function summary() {
+  const fakes = results.filter((r) => ['lossy', 'upsampled', 'padded'].includes(r.kind)).length;
+  const errors = results.filter((r) => r.kind === 'error').length;
+  const ok = results.length - fakes - errors;
+  $('#summary').innerHTML = '';
+  const add = (n, text, cls) => {
+    const el = document.createElement('div');
+    el.className = `stat ${cls}`;
+    el.innerHTML = `<b>${n}</b><span>${text}</span>`;
+    $('#summary').append(el);
+  };
+  add(results.length, 'checked', '');
+  add(fakes, fakes === 1 ? 'fake' : 'fakes', fakes ? 'bad' : '');
+  add(ok, 'real', '');
+  if (errors) add(errors, 'could not check', '');
+  $('#export').hidden = !results.length;
+}
+
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+
+function addRow(r) {
+  const tr = document.createElement('tr');
+  tr.className = `row ${r.kind}`;
+  const name = r.title ? `${r.artist ? r.artist + ' – ' : ''}${r.title}` : r.name;
+  const claim = r.bits ? `${r.format} ${r.bits}/${(r.rate / 1000).toFixed(r.rate % 1000 ? 1 : 0)}` : '';
+  tr.innerHTML = `
+    <td class="name"><div>${esc(name)}</div><small>${esc(r.path)}</small></td>
+    <td class="claim">${esc(claim)}</td>
+    <td class="wall">${r.cutoff ? khz(r.cutoff) : r.kind === 'error' ? '' : 'none'}</td>
+    <td class="verdict"><span class="tag ${r.kind}">${esc(r.label)}</span></td>`;
+  tr.tabIndex = 0;
+  const detail = document.createElement('tr');
+  detail.className = 'detail';
+  detail.hidden = true;
+  const td = document.createElement('td');
+  td.colSpan = 4;
+  detail.append(td);
+  const toggle = () => {
+    detail.hidden = !detail.hidden;
+    tr.classList.toggle('open', !detail.hidden);
+    if (!detail.hidden && !td.firstChild) {
+      const p = document.createElement('p');
+      p.textContent = r.why;
+      td.append(p);
+      if (r.bands) td.append(chart(r));
+    }
+  };
+  tr.addEventListener('click', toggle);
+  tr.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
+  // Fakes go to the top of the table.
+  const body = $('#rows');
+  if (['lossy', 'upsampled', 'padded'].includes(r.kind)) {
+    const firstReal = [...body.querySelectorAll('tr.row')].find((x) => !/(lossy|upsampled|padded)/.test(x.className));
+    if (firstReal) { body.insertBefore(tr, firstReal); body.insertBefore(detail, firstReal); return; }
+  }
+  body.append(tr, detail);
+}
+
+// Average spectrum, 0 Hz to Nyquist, with the wall marked.
+function chart(r) {
+  const css = getComputedStyle(document.documentElement);
+  const fg = css.getPropertyValue('--fg').trim();
+  const muted = css.getPropertyValue('--muted').trim();
+  const line = css.getPropertyValue('--line').trim();
+  const accent = css.getPropertyValue('--accent').trim();
+  const W = 760, H = 220, L = 40, B = 24, T = 10, R = 10;
+  const c = document.createElement('canvas');
+  const dpr = window.devicePixelRatio || 1;
+  c.width = W * dpr; c.height = H * dpr;
+  c.className = 'chart';
+  c.setAttribute('role', 'img');
+  c.setAttribute('aria-label', `Average spectrum. ${r.cutoff ? `Wall at ${khz(r.cutoff)}.` : 'No wall.'}`);
+  const g = c.getContext('2d');
+  g.scale(dpr, dpr);
+  const bands = r.bands;
+  const nyq = bands.length * r.bandHz;
+  const top = Math.max(...bands);
+  const lo = top - 90;
+  const x = (hz) => L + ((W - L - R) * hz) / nyq;
+  const y = (db) => T + ((H - T - B) * (top - Math.max(lo, db))) / (top - lo);
+  g.font = '11px system-ui, sans-serif';
+  g.fillStyle = muted;
+  g.strokeStyle = line;
+  g.lineWidth = 1;
+  for (let k = 0; k <= nyq / 1000; k += nyq > 30000 ? 10 : 5) {
+    g.beginPath(); g.moveTo(x(k * 1000), T); g.lineTo(x(k * 1000), H - B); g.stroke();
+    g.fillText(`${k}k`, x(k * 1000) - 6, H - 8);
+  }
+  for (let d = 0; d <= 90; d += 30) {
+    g.beginPath(); g.moveTo(L, y(top - d)); g.lineTo(W - R, y(top - d)); g.stroke();
+    g.fillText(d ? `-${d}` : '0 dB', 4, y(top - d) + 4);
+  }
+  g.beginPath();
+  bands.forEach((db, i) => { const px = x((i + 0.5) * r.bandHz); i ? g.lineTo(px, y(db)) : g.moveTo(px, y(db)); });
+  g.strokeStyle = fg;
+  g.lineWidth = 1.5;
+  g.stroke();
+  if (r.cutoff) {
+    const fake = r.kind !== 'real';
+    g.setLineDash([4, 4]);
+    g.strokeStyle = fake ? accent : muted;
+    g.beginPath(); g.moveTo(x(r.cutoff), T); g.lineTo(x(r.cutoff), H - B); g.stroke();
+    g.setLineDash([]);
+    g.fillStyle = fake ? accent : muted;
+    g.fillText(`wall ${khz(r.cutoff)}`, Math.min(x(r.cutoff) + 6, W - 90), T + 14);
+  }
+  c.style.width = '100%';
+  c.style.maxWidth = `${W}px`;
+  return c;
+}
+
+function exportCsv() {
+  const cols = ['path', 'artist', 'title', 'format', 'bits', 'rate', 'cutoff', 'kind', 'label'];
+  const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const csv = [cols.join(','), ...results.map((r) => cols.map((k) => q(r[k])).join(','))].join('\r\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+  a.download = 'lossless-check.csv';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+// ---------- wiring ----------
+
+$('#pick-folder').addEventListener('click', () => $('#folder').click());
+$('#pick-files').addEventListener('click', () => $('#files').click());
+$('#folder').addEventListener('change', (e) => addFiles(e.target.files));
+$('#files').addEventListener('change', (e) => addFiles(e.target.files));
+$('#export').addEventListener('click', exportCsv);
+
+const drop = $('#drop');
+document.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
+document.addEventListener('dragleave', (e) => { if (!e.relatedTarget) drop.classList.remove('over'); });
+document.addEventListener('drop', async (e) => {
+  e.preventDefault();
+  drop.classList.remove('over');
+  const items = [...e.dataTransfer.items].map((i) => i.webkitGetAsEntry?.()).filter(Boolean);
+  if (!items.length) return addFiles(e.dataTransfer.files);
+  const out = [];
+  const walk = async (entry, path) => {
+    if (entry.isFile) {
+      const f = await new Promise((res, rej) => entry.file(res, rej));
+      Object.defineProperty(f, 'webkitRelativePath', { value: path + f.name });
+      out.push(f);
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      for (;;) {
+        const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+        if (!batch.length) break;
+        for (const child of batch) await walk(child, `${path}${entry.name}/`);
+      }
+    }
+  };
+  for (const it of items) await walk(it, '');
+  addFiles(out);
+});
+
+})();
+</script>
+</body>
+</html>
