@@ -43,7 +43,7 @@ const evaluate = async (expr) => (await send('Runtime.evaluate', { expression: e
 
 await send('Runtime.enable');
 await send('Page.enable');
-await send('Page.navigate', { url: pathToFileURL(resolve('dist/lossless-check.html')).href });
+await send('Page.navigate', { url: process.env.PAGE || pathToFileURL(resolve('dist/lossless-check.html')).href });
 await sleep(1500);
 const doc = await send('DOM.getDocument');
 const node = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#files' });
